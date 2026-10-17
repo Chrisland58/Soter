@@ -770,15 +770,22 @@ export class SorobanOnchainAdapter implements OnchainAdapter {
     const rawHistory = Array.isArray(result) ? result : [];
     const history: DelegateHistoryEntry[] = rawHistory.map(
       (entry: Record<string, unknown>) => ({
-        packageId: String(entry?.package_id ?? params.packageId),
+        packageId:
+          entry?.package_id != null
+            ? String(entry.package_id as string | number)
+            : params.packageId,
         previousDelegate:
           entry?.previous_delegate != null
-            ? String(entry.previous_delegate)
+            ? String(entry.previous_delegate as string)
             : undefined,
-        newDelegate: String(entry?.new_delegate ?? ''),
-        changedBy: String(entry?.changed_by ?? ''),
+        newDelegate:
+          entry?.new_delegate != null
+            ? String(entry.new_delegate as string)
+            : '',
+        changedBy:
+          entry?.changed_by != null ? String(entry.changed_by as string) : '',
         changedAt: Number(entry?.changed_at ?? 0),
-        reason: String(entry?.reason ?? ''),
+        reason: entry?.reason != null ? String(entry.reason as string) : '',
       }),
     );
 

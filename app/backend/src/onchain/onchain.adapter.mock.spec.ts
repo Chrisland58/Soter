@@ -611,7 +611,9 @@ describe('MockOnchainAdapter', () => {
     });
 
     it('getDelegate returns undefined delegateAddress when none set', async () => {
-      const result = await adapter.getDelegate({ packageId: 'no-delegate-pkg' });
+      const result = await adapter.getDelegate({
+        packageId: 'no-delegate-pkg',
+      });
       expect(result.delegateAddress).toBeUndefined();
     });
 

@@ -24,9 +24,7 @@ import { BudgetService } from '../common/budget/budget.service';
 import { AuditService } from '../audit/audit.service';
 import {
   GetTransactionStatusResult,
-  SetDelegateParams,
   SetDelegateResult,
-  RevokeDelegateParams,
   RevokeDelegateResult,
   GetDelegateResult,
   GetDelegateHistoryResult,
@@ -625,7 +623,9 @@ export class AidEscrowService {
   /**
    * Get the full delegate change history for a package.
    */
-  async getDelegateHistory(packageId: string): Promise<GetDelegateHistoryResult> {
+  async getDelegateHistory(
+    packageId: string,
+  ): Promise<GetDelegateHistoryResult> {
     this.logger.debug('Getting delegate history:', { packageId });
     return this.onchainAdapter.getDelegateHistory({ packageId });
   }

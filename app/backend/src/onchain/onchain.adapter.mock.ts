@@ -940,7 +940,8 @@ export class MockOnchainAdapter implements OnchainAdapter {
       changedAt: Math.floor(Date.now() / 1000),
       reason: 'delegate_set',
     };
-    const existing_history = this.mockDelegateHistory.get(params.packageId) ?? [];
+    const existing_history =
+      this.mockDelegateHistory.get(params.packageId) ?? [];
     this.mockDelegateHistory.set(params.packageId, [
       ...existing_history,
       historyEntry,

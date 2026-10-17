@@ -1285,7 +1285,9 @@ export class SorobanAdapter implements OnchainAdapter {
       `[${cid}] setDelegate packageId=${params.packageId} delegate=${params.delegateAddress}`,
     );
 
-    const method = params.expiresAt ? 'set_delegate_with_expiry' : 'set_delegate';
+    const method = params.expiresAt
+      ? 'set_delegate_with_expiry'
+      : 'set_delegate';
     const args = params.expiresAt
       ? [
           this.scvAddress(params.adminAddress),
@@ -1321,9 +1323,7 @@ export class SorobanAdapter implements OnchainAdapter {
   ): Promise<RevokeDelegateResult> {
     this.ensureConfigured();
     const cid = this.correlationId();
-    this.logger.log(
-      `[${cid}] revokeDelegate packageId=${params.packageId}`,
-    );
+    this.logger.log(`[${cid}] revokeDelegate packageId=${params.packageId}`);
 
     const { hash } = await this.submitContractOp(
       'revoke_delegate',

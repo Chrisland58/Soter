@@ -92,6 +92,15 @@ result envelope. Requests without `stream=true` continue to return the normal
 single JSON envelope and use the existing response cache. Token events contain
 partial provider text; the final result event is authoritative.
 
+Successful verification attempts for the same `anchor_metadata.claim_id` (or
+the same evidence artifact IDs when no claim ID is supplied) are subject to
+`VERIFICATION_COOLDOWN_SECONDS` (default `300`). The cooldown is scoped to the
+organization, and repeat requests inside the interval reuse the prior result
+without another provider call. Such responses include
+`X-Verification-Cooldown: true`. Attempts after the interval may be processed
+again. Requests without a claim ID or artifact IDs do not have a stable
+identity to cooldown.
+
 Request body:
 
 ```json

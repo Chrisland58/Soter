@@ -80,6 +80,7 @@ class Settings(BaseSettings):
         PROOF_OF_LIFE_CONFIDENCE_THRESHOLD: Default threshold for liveness verification
         PROOF_OF_LIFE_MIN_FACE_SIZE: Minimum detected face size in pixels
         CACHE_TTL_VERIFICATION: TTL for cached AI verification responses (artifact + model-version keyed)
+        VERIFICATION_COOLDOWN_SECONDS: Minimum interval between successful verifications of the same claim or artifacts
         FRAUD_PASS_MAX_SCORE: Claims scoring below this are banded 'pass'
         FRAUD_REVIEW_MAX_SCORE: Claims scoring below this (and above pass) are 'review'; at/above it is 'reject'
     """
@@ -228,6 +229,7 @@ class Settings(BaseSettings):
     cache_ttl_verification: int = (
         120  # AI verification responses, keyed by claim/artifact/model version
     )
+    verification_cooldown_seconds: int = 300
 
     # Fraud detection decision thresholds.
     # A claim's normalised fraud_risk_score (0 = lowest risk, 1 = highest
@@ -433,6 +435,7 @@ class Settings(BaseSettings):
             ("CACHE_TTL_TASK_STATUS", self.cache_ttl_task_status),
             ("CACHE_TTL_ARTIFACT_ACCESS", self.cache_ttl_artifact_access),
             ("CACHE_TTL_VERIFICATION", self.cache_ttl_verification),
+            ("VERIFICATION_COOLDOWN_SECONDS", self.verification_cooldown_seconds),
             ("TASK_RETRY_DELAY_SECONDS", self.task_retry_delay_seconds),
             ("ASYNC_JOB_IDLE_TIMEOUT_SECONDS", self.async_job_idle_timeout_seconds),
             (

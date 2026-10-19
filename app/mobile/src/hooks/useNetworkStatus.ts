@@ -27,6 +27,12 @@ export const useNetworkStatus = (
   useEffect(() => {
     let wasOffline = false;
     let previousType: string | null = null;
+    // Guard against spurious type-change events emitted by Android emulators
+    // during app startup (e.g. 'unknown' → 'wifi' while already connected).
+    // We only start tracking type changes after the first stable connected
+    // event has been observed, so the very first NetInfo callback — which
+    // merely reports the current state — never triggers onNetworkChange.
+    let wasConnectedOnce = false;
 
     const unsubscribe = NetInfo.addEventListener((state: NetInfoState) => {
       const connected = state.isConnected ?? false;
@@ -41,6 +47,7 @@ export const useNetworkStatus = (
         }
       } else if (
         connected &&
+        wasConnectedOnce &&
         previousType !== null &&
         state.type !== previousType &&
         onNetworkChange
@@ -57,6 +64,7 @@ export const useNetworkStatus = (
       // treating reconnect-on-different-interface as a type-change event.
       if (connected) {
         previousType = state.type;
+        wasConnectedOnce = true;
       }
     });
 

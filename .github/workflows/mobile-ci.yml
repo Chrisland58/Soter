@@ -49,6 +49,6 @@ jobs:
         working-directory: app/mobile
         run: |
           npx jest \
-            --testPathPattern="src/__tests__/(syncQueue|evidenceUpload|networkGuard\.test|valueAction|localCache|logger|mockData|aidCache|coldStart|healthCache|syncQueueRate|syncQueueCorr|updateOffline|walletSession|walletDisconnect|certificatePin)" \
+            --testPathPattern="src/__tests__/(syncQueue|evidenceUpload|useNetworkStatus|networkGuard\.test|valueAction|localCache|logger|mockData|aidCache|coldStart|healthCache|syncQueueRate|syncQueueCorr|updateOffline|walletSession|walletDisconnect|certificatePin)" \
             --forceExit \
             --passWithNoTests

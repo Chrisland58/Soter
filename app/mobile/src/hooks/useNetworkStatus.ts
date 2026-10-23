@@ -14,6 +14,8 @@ export interface NetworkStatus {
   networkQuality: NetworkQualityState;
 }
 
+type NetworkStatusCallback = () => void | Promise<void>;
+
 export const evaluateNetworkQuality = (samples: NetworkRequestSample[]): NetworkQualityState => {
   const recent = samples.filter(
     (sample) => sample && (typeof sample.latencyMs === 'number' || typeof sample.failed === 'boolean'),
@@ -51,7 +53,8 @@ export const evaluateNetworkQuality = (samples: NetworkRequestSample[]): Network
  *     rather than restarting from zero.
  */
 export const useNetworkStatus = (
-  onReconnect?: () => void | Promise<void>,
+  onReconnect?: NetworkStatusCallback,
+  onNetworkChange?: NetworkStatusCallback,
 ): NetworkStatus & { recordRequestOutcome: (latencyMs?: number | null, failed?: boolean) => void } => {
   const sampleWindowRef = useRef<NetworkRequestSample[]>([]);
   const [status, setStatus] = useState<NetworkStatus>({

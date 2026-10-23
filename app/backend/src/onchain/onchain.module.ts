@@ -10,7 +10,15 @@ import { OnchainProcessor } from './onchain.processor';
 import { OnchainService } from './onchain.service';
 import { LedgerBackfillService } from './ledger-backfill.service';
 import { LedgerReconciliationService } from './ledger-reconciliation.service';
+import { LedgerReconciliationAlertService } from './ledger-reconciliation-alert.service';
 import { LedgerAdminController } from './ledger-admin.controller';
+import { AdminTransferController } from './admin-transfer.controller';
+import { AdminTransferService } from './admin-transfer.service';
+import { ActionPauseController } from './action-pause.controller';
+import { ActionPauseService } from './action-pause.service';
+import { StellarLedgerSource } from './stellar-ledger-source';
+import { SurplusWithdrawalController } from './surplus-withdrawal.controller';
+import { SurplusWithdrawalService } from './surplus-withdrawal.service';
 import { JobsModule } from '../jobs/jobs.module';
 import { LoggerModule } from '../logger/logger.module';
 import { MetricsModule } from '../observability/metrics/metrics.module';
@@ -19,8 +27,10 @@ import { SorobanTransactionScheduler } from './soroban-transaction.scheduler';
 import { SorobanTransactionProcessor } from './soroban-transaction.processor';
 import { SorobanEventCorrelationService } from './soroban-event-correlation.service';
 import { SorobanEventCorrelationScheduler } from './soroban-event-correlation.scheduler';
+import { SorobanCorrelationTraceService } from './soroban-correlation-trace.service';
 import { PrismaModule } from '../prisma/prisma.module';
 import { CommonServicesModule } from '../common/services/common-services.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 const skipBackgroundJobs = process.env.SKIP_BACKGROUND_JOBS === 'true';
 
@@ -90,30 +100,46 @@ const onchainAdapterProvider: Provider = {
     LoggerModule,
     MetricsModule,
     CommonServicesModule,
+    NotificationsModule,
   ],
-  controllers: [LedgerAdminController],
+  controllers: [
+    LedgerAdminController,
+    AdminTransferController,
+    ActionPauseController,
+    SurplusWithdrawalController,
+  ],
   providers: [
     MockOnchainAdapter,
     SorobanAdapter,
     onchainAdapterProvider,
     OnchainProcessor,
     OnchainService,
+    StellarLedgerSource,
     LedgerBackfillService,
     LedgerReconciliationService,
+    LedgerReconciliationAlertService,
+    SurplusWithdrawalService,
+    AdminTransferService,
+    ActionPauseService,
     SorobanTransactionLifecycleService,
     SorobanTransactionScheduler,
     SorobanTransactionProcessor,
     SorobanEventCorrelationService,
     SorobanEventCorrelationScheduler,
+    SorobanCorrelationTraceService,
   ],
   exports: [
     ONCHAIN_ADAPTER_TOKEN,
     OnchainService,
+    StellarLedgerSource,
     LedgerBackfillService,
     LedgerReconciliationService,
+    LedgerReconciliationAlertService,
+    SurplusWithdrawalService,
     SorobanTransactionLifecycleService,
     SorobanTransactionScheduler,
     SorobanEventCorrelationService,
+    SorobanCorrelationTraceService,
   ],
 })
 export class OnchainModule {}

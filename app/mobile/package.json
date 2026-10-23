@@ -10,7 +10,8 @@
     "test": "jest",
     "lint": "expo lint",
     "i18n:check": "node scripts/check-i18n.mjs",
-    "measure:cold-start": "node scripts/measure-cold-start.js"
+    "measure:cold-start": "node scripts/measure-cold-start.js",
+    "e2e:android": "node e2e/run-e2e.js"
   },
   "dependencies": {
     "@babel/runtime": "^7.29.7",
@@ -67,19 +68,6 @@
     "react-test-renderer": "19.1.0",
     "ts-jest": "^29.2.5",
     "typescript": "~5.9.2"
-  },
-  "jest": {
-    "preset": "jest-expo",
-    "setupFilesAfterEnv": [
-      "<rootDir>/jest.setup.ts"
-    ],
-    "moduleNameMapper": {
-      "^react$": "<rootDir>/node_modules/react",
-      "^react-test-renderer$": "<rootDir>/node_modules/react-test-renderer"
-    },
-    "transformIgnorePatterns": [
-      "node_modules/(?!(?:.pnpm/)?((jest-)?react-native|@react-native(?:/.*)?|react-clone-referenced-element|@react-navigation(?:/.*)?|expo(?:nent)?(?:/.*)?|@expo(?:nent)?(?:/.*)?|expo-.*|@expo-google-fonts/.*|react-navigation|@walletconnect(?:/.*)?))"
-    ]
   },
   "private": true
 }

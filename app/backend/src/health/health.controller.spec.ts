@@ -10,6 +10,7 @@ import { LoggerService } from '../logger/logger.service';
 import { ONCHAIN_ADAPTER_TOKEN } from '../onchain/onchain.adapter';
 import { REDIS_CLIENT } from '../redis/redis.module';
 import { ProviderHealthRegistryService } from './provider-health-registry.service';
+import { NotificationProviderHealthService } from '../notifications/notification-provider-health.service';
 
 describe('HealthController', () => {
   let app: INestApplication;
@@ -47,6 +48,10 @@ describe('HealthController', () => {
     ping: jest.fn(),
   };
 
+  const notificationProviderHealthMock = {
+    checkProviders: jest.fn(),
+  };
+
   const originalFetch = global.fetch;
 
   beforeAll(async () => {
@@ -66,6 +71,10 @@ describe('HealthController', () => {
             getAllStatuses: jest.fn().mockReturnValue({}),
           },
         },
+        {
+          provide: NotificationProviderHealthService,
+          useValue: notificationProviderHealthMock,
+        },
       ],
     }).compile();
 
@@ -78,8 +87,7 @@ describe('HealthController', () => {
     jest.clearAllMocks();
     // Readiness caching is intentionally instance state; reset it between
     // tests so one test's cached result can't leak into the next.
-    (healthService as unknown as { readinessCache: unknown }).readinessCache =
-      null;
+    (healthService as any).readinessCache = null;
     configValues.STELLAR_RPC_URL = undefined;
     configValues.HEALTHCHECK_STELLAR_REQUIRED = undefined;
     configValues.HEALTHCHECK_STELLAR_TIMEOUT_MS = undefined;
@@ -87,11 +95,32 @@ describe('HealthController', () => {
     configValues.HEALTHCHECK_AI_REQUIRED = undefined;
     configValues.HEALTHCHECK_CACHE_TTL_MS = '0';
     configValues.AI_SERVICE_URL = undefined;
+    configValues.ONCHAIN_ADAPTER = undefined;
+    configValues.HEALTHCHECK_ONCHAIN_REQUIRED = undefined;
+    configValues.HEALTHCHECK_ONCHAIN_TIMEOUT_MS = undefined;
+    configValues.HEALTHCHECK_NOTIFICATION_TIMEOUT_MS = undefined;
     configValues.GIT_SHA = undefined;
     configValues.BUILD_TIMESTAMP = undefined;
     prismaMock.$queryRaw.mockResolvedValue([{ '?column?': 1 }]);
     redisClientMock.ping.mockResolvedValue('PONG');
+    onchainAdapterMock.getContractMetadata.mockResolvedValue({
+      version: '1.0.0',
+      name: 'Soroban AidEscrow Contract',
+      timestamp: new Date(),
+    });
     global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200 });
+    notificationProviderHealthMock.checkProviders.mockResolvedValue({
+      email: {
+        provider: 'sendgrid',
+        reachable: true,
+        latencyMs: 1,
+      },
+      sms: {
+        provider: 'twilio',
+        reachable: true,
+        latencyMs: 1,
+      },
+    });
   });
 
   afterEach(() => {
@@ -157,7 +186,7 @@ describe('HealthController', () => {
       expect.objectContaining({
         status: 'ready',
         ready: true,
-        checks: {
+        checks: expect.objectContaining({
           database: expect.objectContaining({
             status: 'up',
             latencyMs: expect.any(Number),
@@ -174,7 +203,15 @@ describe('HealthController', () => {
             status: 'skipped',
             latencyMs: 0,
           }),
-        },
+          onchainAdapter: expect.objectContaining({
+            status: 'up',
+            latencyMs: expect.any(Number),
+          }),
+          notificationProviders: expect.objectContaining({
+            status: 'up',
+            latencyMs: expect.any(Number),
+          }),
+        }),
       }),
     );
   });
@@ -244,6 +281,112 @@ describe('HealthController', () => {
     );
   });
 
+  it('GET /health/ready reports notification providers healthy', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/health/ready')
+      .expect(200);
+
+    expect(res.body).toEqual(
+      expect.objectContaining({
+        status: 'ready',
+        ready: true,
+        checks: expect.objectContaining({
+          notificationProviders: expect.objectContaining({
+            status: 'up',
+            latencyMs: expect.any(Number),
+            details: expect.objectContaining({
+              providers: expect.objectContaining({
+                email: expect.objectContaining({
+                  status: 'up',
+                  provider: 'sendgrid',
+                }),
+                sms: expect.objectContaining({
+                  status: 'up',
+                  provider: 'twilio',
+                }),
+              }),
+            }),
+          }),
+        }),
+      }),
+    );
+  });
+
+  it('GET /health/ready reports degraded (200) when a notification provider is unreachable', async () => {
+    notificationProviderHealthMock.checkProviders.mockResolvedValueOnce({
+      email: {
+        provider: 'sendgrid',
+        reachable: false,
+        latencyMs: 2000,
+        error: 'SendGrid health check failed: HTTP 503',
+      },
+      sms: {
+        provider: 'twilio',
+        reachable: true,
+        latencyMs: 1,
+      },
+    });
+
+    const res = await request(app.getHttpServer())
+      .get('/health/ready')
+      .expect(200);
+
+    expect(res.body).toEqual(
+      expect.objectContaining({
+        status: 'degraded',
+        ready: true,
+        checks: expect.objectContaining({
+          notificationProviders: expect.objectContaining({
+            status: 'down',
+            details: expect.objectContaining({
+              providers: expect.objectContaining({
+                email: expect.objectContaining({
+                  status: 'down',
+                  provider: 'sendgrid',
+                  error: 'SendGrid health check failed: HTTP 503',
+                }),
+                sms: expect.objectContaining({ status: 'up' }),
+              }),
+            }),
+          }),
+        }),
+      }),
+    );
+  });
+
+  it('GET /health/ready skips notification providers when none is externally configured', async () => {
+    notificationProviderHealthMock.checkProviders.mockResolvedValueOnce({
+      email: {
+        provider: 'console',
+        reachable: true,
+        latencyMs: 0,
+        skipped: true,
+      },
+      sms: {
+        provider: 'console',
+        reachable: true,
+        latencyMs: 0,
+        skipped: true,
+      },
+    });
+
+    const res = await request(app.getHttpServer())
+      .get('/health/ready')
+      .expect(200);
+
+    expect(res.body).toEqual(
+      expect.objectContaining({
+        status: 'ready',
+        ready: true,
+        checks: expect.objectContaining({
+          notificationProviders: expect.objectContaining({
+            status: 'skipped',
+          }),
+        }),
+      }),
+    );
+  });
+
   it('GET /health/ready returns 503 when Redis is required and down', async () => {
     configValues.HEALTHCHECK_REDIS_REQUIRED = 'true';
     redisClientMock.ping.mockRejectedValueOnce(new Error('connection refused'));
@@ -299,6 +442,128 @@ describe('HealthController', () => {
 
     expect(second.body).toEqual(first.body);
     expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1);
+    // Clear the unused mockRejectedValueOnce so it does not affect subsequent tests
+    prismaMock.$queryRaw.mockReset();
+    prismaMock.$queryRaw.mockResolvedValue([{ '?column?': 1 }]);
+  });
+
+  it('GET /health/ready includes onchainAdapter health check details and active adapter', async () => {
+    configValues.ONCHAIN_ADAPTER = 'mock';
+
+    const res = await request(app.getHttpServer())
+      .get('/health/ready')
+      .expect(200);
+
+    expect(res.body.checks.onchainAdapter).toEqual(
+      expect.objectContaining({
+        status: 'up',
+        latencyMs: expect.any(Number),
+        details: expect.objectContaining({
+          adapter: 'mock',
+          connected: true,
+          contractName: 'Soroban AidEscrow Contract',
+          contractVersion: '1.0.0',
+        }),
+      }),
+    );
+  });
+
+  it('GET /health/ready reports degraded (200) when onchainAdapter fails and is not required', async () => {
+    onchainAdapterMock.getContractMetadata.mockRejectedValueOnce(
+      new Error('adapter unreachable'),
+    );
+
+    const res = await request(app.getHttpServer())
+      .get('/health/ready')
+      .expect(200);
+
+    expect(res.body).toEqual(
+      expect.objectContaining({
+        status: 'degraded',
+        ready: true,
+        checks: expect.objectContaining({
+          database: expect.objectContaining({ status: 'up' }),
+          onchainAdapter: expect.objectContaining({
+            status: 'down',
+            latencyMs: expect.any(Number),
+            details: expect.objectContaining({
+              adapter: 'mock',
+              connected: false,
+              error: 'adapter unreachable',
+            }),
+          }),
+        }),
+      }),
+    );
+  });
+
+  it('GET /health/ready returns 503 when onchainAdapter is required and fails', async () => {
+    configValues.HEALTHCHECK_ONCHAIN_REQUIRED = 'true';
+    onchainAdapterMock.getContractMetadata.mockRejectedValueOnce(
+      new Error('adapter unreachable'),
+    );
+
+    const res = await request(app.getHttpServer())
+      .get('/health/ready')
+      .expect(503);
+
+    expect(res.body).toEqual(
+      expect.objectContaining({
+        status: 'not_ready',
+        ready: false,
+        checks: expect.objectContaining({
+          onchainAdapter: expect.objectContaining({
+            status: 'down',
+            latencyMs: expect.any(Number),
+            details: expect.objectContaining({
+              adapter: 'mock',
+              connected: false,
+              error: 'adapter unreachable',
+            }),
+          }),
+        }),
+      }),
+    );
+  });
+
+  it('GET /health/onchain returns active adapter and latency on success', async () => {
+    configValues.ONCHAIN_ADAPTER = 'soroban';
+
+    const res = await request(app.getHttpServer())
+      .get('/health/onchain')
+      .expect(200);
+
+    expect(res.body).toEqual(
+      expect.objectContaining({
+        status: 'up',
+        latencyMs: expect.any(Number),
+        adapter: 'soroban',
+        metadata: {
+          version: '1.0.0',
+          name: 'Soroban AidEscrow Contract',
+        },
+      }),
+    );
+  });
+
+  it('GET /health/onchain returns 503 and error details when adapter fails', async () => {
+    configValues.ONCHAIN_ADAPTER = 'soroban';
+    onchainAdapterMock.getContractMetadata.mockRejectedValueOnce(
+      new Error('rpc connection error'),
+    );
+
+    const res = await request(app.getHttpServer())
+      .get('/health/onchain')
+      .expect(503);
+
+    expect(res.body).toEqual(
+      expect.objectContaining({
+        status: 'down',
+        latencyMs: expect.any(Number),
+        adapter: 'soroban',
+        error: 'rpc connection error',
+      }),
+    );
   });
 
   it('GET /health/metadata returns safe service metadata', async () => {

@@ -49,6 +49,7 @@ from threading import Lock
 from typing import Any, Dict, Iterable, List, Optional, Set
 
 from logging_redaction import redact
+from redaction_ruleset import REDACTION_RULESET_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,9 @@ class DecisionAuditRecord:
     inputs: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
     schema_version: str = AUDIT_RECORD_SCHEMA_VERSION
+    #: Redaction rule-set version that redacted this record (issue #1428).
+    #: ``None`` only for records persisted before versioning existed.
+    redaction_ruleset_version: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -142,6 +146,9 @@ class DecisionAuditRecord:
         }
         redacted = _redact_value(data)
         redacted.update(preserved)
+        # Stamp the rule set that did this redaction, so the version always
+        # reflects the rules in force when the record was persisted.
+        redacted["redaction_ruleset_version"] = REDACTION_RULESET_VERSION
         return DecisionAuditRecord(**redacted)
 
     @classmethod
@@ -381,12 +388,18 @@ class DecisionAuditStore:
         claim_id: Optional[str] = None,
         campaign_ref: Optional[str] = None,
         decision_type: Optional[str] = None,
+        created_after: Optional[float] = None,
+        created_before: Optional[float] = None,
+        offset: int = 0,
         limit: int = 100,
     ) -> List[DecisionAuditRecord]:
         """Return matching records, newest first.
 
         Supplying several identifiers intersects them (logical AND), so an
         operator can narrow to "this claim, on this campaign" precisely.
+        Optional ``created_after`` / ``created_before`` bound the result to a
+        date range (Unix timestamps). ``offset`` skips leading matches for
+        paginated exports (issue #1206).
         """
         with self._lock:
             candidate_ids: Optional[Set[str]] = None
@@ -410,7 +423,14 @@ class DecisionAuditStore:
             if decision_type:
                 matches = [r for r in matches if r.decision_type == decision_type]
 
+            if created_after is not None:
+                matches = [r for r in matches if r.created_at >= created_after]
+            if created_before is not None:
+                matches = [r for r in matches if r.created_at <= created_before]
+
             matches.sort(key=lambda r: r.created_at, reverse=True)
+            if offset and offset > 0:
+                matches = matches[offset:]
             if limit and limit > 0:
                 matches = matches[:limit]
             return matches

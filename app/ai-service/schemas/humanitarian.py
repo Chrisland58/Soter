@@ -23,10 +23,14 @@ class LLMVerificationPayload(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
 
 
+AID_CLAIM_MAX_LENGTH = 5000
+
+
 class HumanitarianVerificationRequest(BaseModel):
     aid_claim: str = Field(
         min_length=10,
-        description="Aid claim to verify",
+        max_length=AID_CLAIM_MAX_LENGTH,
+        description=f"Aid claim to verify (10 to {AID_CLAIM_MAX_LENGTH} characters)",
         examples=["Family of 5 displaced by flood needs food and shelter"],
     )
     supporting_evidence: List[str] = Field(
@@ -56,6 +60,12 @@ class HumanitarianVerificationRequest(BaseModel):
         default=None,
         description="Explicit prompt version to use from registry (defaults to configured active version)",
         examples=["v1"],
+    )
+    language: Optional[str] = Field(
+        default=None,
+        description="Optional language hint for the claim (e.g. 'es', 'fr', 'pt', 'ar', 'en'). "
+        "When omitted or unsupported, the language is detected from the claim text.",
+        examples=["es"],
     )
     anchor_metadata: Optional[AnchorMetadata] = None
 
@@ -101,6 +111,25 @@ class HumanitarianVerificationResponse(BaseModel):
     )
     error: Optional[str] = Field(None, examples=["Provider timed out"])
     anchor_metadata: Optional[AnchorMetadata] = None
+    flagged_for_manual_review: bool = Field(
+        default=False,
+        description=(
+            "True when the claim could not be verified automatically and has been "
+            "routed to a human reviewer. The claim will be re-processed by the AI "
+            "pipeline once a provider becomes available again."
+        ),
+        examples=[True],
+    )
+    manual_review_reason: Optional[str] = Field(
+        default=None,
+        description=(
+            "Human-readable explanation of why the claim was flagged for manual "
+            "review. Present only when flagged_for_manual_review is True."
+        ),
+        examples=[
+            "All AI providers are currently unavailable; claim queued for human review."
+        ],
+    )
 
     model_config = {
         "json_schema_extra": {
@@ -119,8 +148,15 @@ class HumanitarianVerificationResponse(BaseModel):
                         "campaign_ref": "campaign-2024-001",
                         "claim_id": "claim-abc123",
                     },
+                    "flagged_for_manual_review": False,
+                    "manual_review_reason": None,
                 },
                 {"success": False, "error": "Provider timed out"},
+                {
+                    "success": True,
+                    "flagged_for_manual_review": True,
+                    "manual_review_reason": "All AI providers are currently unavailable; claim queued for human review.",
+                },
             ]
         }
     }

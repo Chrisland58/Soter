@@ -1,0 +1,43 @@
+name: Actionlint
+
+on:
+  push:
+    branches:
+      - main
+      - 'release/**'
+    paths:
+      - '.github/workflows/**.yml'
+      - '.github/workflows/**.yaml'
+  pull_request:
+    paths:
+      - '.github/workflows/**.yml'
+      - '.github/workflows/**.yaml'
+
+jobs:
+  actionlint:
+    name: Lint GitHub Actions workflows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install actionlint
+        run: |
+          ACTIONLINT_VERSION=1.7.7
+          curl -fsSL \
+            "https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash" \
+            -o /tmp/download-actionlint.bash
+          bash /tmp/download-actionlint.bash "$ACTIONLINT_VERSION" /tmp
+
+      - name: Run actionlint
+        # Fails the job on any workflow error (e.g. invalid YAML structure,
+        # secrets in `if:`) so it is caught before merge (#1399).
+        # The ignores below cover pre-existing notices in other workflows
+        # (setup-python@v4 runner age, SC2034 in backend-ci.yml, SC2044 in
+        # frontend-ci.yml). Remove each once the underlying workflow is fixed.
+        run: |
+          /tmp/actionlint -color \
+            -ignore 'the runner of "actions/setup-python@v4" action is too old' \
+            -ignore 'SC2034:warning:1:1: i appears unused' \
+            -ignore 'SC2044:warning:2:12: For loops over find output are fragile'
+            

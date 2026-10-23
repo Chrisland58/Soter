@@ -12,6 +12,7 @@ import {
   ProviderHealthRegistryService,
   ProviderHealthSnapshot,
 } from './provider-health-registry.service';
+import { NotificationProviderHealthService } from '../notifications/notification-provider-health.service';
 
 export type CheckStatus = 'up' | 'down' | 'skipped';
 export type ReadinessStatus = 'ready' | 'degraded' | 'not_ready';
@@ -50,6 +51,8 @@ export interface ReadinessResponse {
     redis: HealthCheckResult;
     aiService: HealthCheckResult;
     stellarRpc: HealthCheckResult;
+    onchainAdapter: HealthCheckResult;
+    notificationProviders: HealthCheckResult;
   };
   providers?: Record<string, ProviderHealthSnapshot>;
 }
@@ -75,6 +78,7 @@ export class HealthService {
     @Inject(REDIS_CLIENT)
     private readonly redisClient: Redis,
     private readonly providerHealthRegistry: ProviderHealthRegistryService,
+    private readonly notificationProviderHealth: NotificationProviderHealthService,
   ) {}
 
   check() {
@@ -122,11 +126,20 @@ export class HealthService {
       return cached;
     }
 
-    const [database, redis, aiService, stellarRpc] = await Promise.all([
+    const [
+      database,
+      redis,
+      aiService,
+      stellarRpc,
+      onchainAdapter,
+      notificationProviders,
+    ] = await Promise.all([
       this.checkDatabase(),
       this.checkRedis(),
       this.checkAiService(),
       this.checkStellarRpc(),
+      this.checkOnchainAdapter(),
+      this.checkNotificationProviders(),
     ]);
 
     const stellarRequired = this.isEnabled(
@@ -138,16 +151,25 @@ export class HealthService {
     const aiRequired = this.isEnabled(
       this.configService.get<string>('HEALTHCHECK_AI_REQUIRED'),
     );
+    const onchainRequired = this.isEnabled(
+      this.configService.get<string>('HEALTHCHECK_ONCHAIN_REQUIRED'),
+    );
 
     const hardFailure =
       database.status === 'down' ||
       (stellarRequired && stellarRpc.status === 'down') ||
       (redisRequired && redis.status === 'down') ||
-      (aiRequired && aiService.status === 'down');
+      (aiRequired && aiService.status === 'down') ||
+      (onchainRequired && onchainAdapter.status === 'down');
 
-    const anyDependencyDown = [database, redis, aiService, stellarRpc].some(
-      check => check.status === 'down',
-    );
+    const anyDependencyDown = [
+      database,
+      redis,
+      aiService,
+      stellarRpc,
+      onchainAdapter,
+      notificationProviders,
+    ].some(check => check.status === 'down');
 
     const status: ReadinessStatus = hardFailure
       ? 'not_ready'
@@ -167,6 +189,8 @@ export class HealthService {
         redis,
         aiService,
         stellarRpc,
+        onchainAdapter,
+        notificationProviders,
       },
       providers,
     };
@@ -458,39 +482,169 @@ export class HealthService {
     return value.trim().toLowerCase() === 'true';
   }
 
-  async checkOnchainContract(): Promise<{
-    status: 'up' | 'down';
-    latencyMs: number;
-    metadata?: { version: string; name: string };
-    error?: string;
-  }> {
-    const startTime = Date.now();
+  async checkOnchainAdapter(): Promise<HealthCheckResult> {
+    const adapterType =
+      this.configService.get<string>('ONCHAIN_ADAPTER')?.toLowerCase() ||
+      'mock';
+    const timeoutMs = this.getPositiveNumber(
+      'HEALTHCHECK_ONCHAIN_TIMEOUT_MS',
+      3000,
+    );
+    const start = Date.now();
+
     try {
-      const contractMetadata = await this.onchainAdapter.getContractMetadata();
-      const latency = Date.now() - startTime;
+      const metadata = await this.withTimeout(
+        this.onchainAdapter.getContractMetadata(),
+        timeoutMs,
+        `On-chain adapter health check timed out after ${timeoutMs}ms`,
+      );
+      const latencyMs = Date.now() - start;
+
       return {
         status: 'up',
-        latencyMs: latency,
-        metadata: {
-          version: contractMetadata.version,
-          name: contractMetadata.name,
+        latencyMs,
+        details: {
+          adapter: adapterType,
+          connected: true,
+          contractName: metadata.name,
+          contractVersion: metadata.version,
         },
       };
     } catch (error) {
-      const latency = Date.now() - startTime;
-      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-      this.logger.error(
-        'On-chain contract health check failed',
-        undefined,
+      const latencyMs = Date.now() - start;
+      const message =
+        error instanceof Error ? error.message : 'Unknown on-chain error';
+
+      this.logger.warn(
+        'On-chain adapter health check failed',
         'HealthService',
-        { error: errorMsg },
+        {
+          error: message,
+          adapter: adapterType,
+        },
       );
+
       return {
         status: 'down',
-        latencyMs: latency,
-        error: errorMsg,
+        latencyMs,
+        details: {
+          adapter: adapterType,
+          connected: false,
+          error: message,
+        },
       };
     }
+  }
+
+  /**
+   * Lightweight probe of the configured email/SMS delivery providers.
+   *
+   * Notification delivery is deliberately a soft dependency: a provider
+   * outage is reported as `degraded` (HTTP 200) rather than making the whole
+   * service `not_ready`, because the rest of the API remains usable while
+   * deliveries queue up.
+   */
+  private async checkNotificationProviders(): Promise<HealthCheckResult> {
+    const timeoutMs = this.getPositiveNumber(
+      'HEALTHCHECK_NOTIFICATION_TIMEOUT_MS',
+      2000,
+    );
+    const start = Date.now();
+
+    try {
+      const providers =
+        await this.notificationProviderHealth.checkProviders(timeoutMs);
+
+      const providerDetails: Record<string, unknown> = {};
+      const statuses: CheckStatus[] = [];
+
+      for (const [channel, result] of Object.entries(providers)) {
+        const status: CheckStatus = result.skipped
+          ? 'skipped'
+          : result.reachable
+            ? 'up'
+            : 'down';
+        statuses.push(status);
+        providerDetails[channel] = {
+          status,
+          provider: result.provider,
+          latencyMs: result.latencyMs,
+          ...(result.error ? { error: result.error } : {}),
+        };
+      }
+
+      const status: CheckStatus = statuses.includes('down')
+        ? 'down'
+        : statuses.includes('up')
+          ? 'up'
+          : 'skipped';
+
+      if (status === 'down') {
+        this.logger.warn(
+          'Notification provider readiness check failed',
+          'HealthService',
+          { providers: providerDetails },
+        );
+      }
+
+      return {
+        status,
+        latencyMs: Date.now() - start,
+        details: {
+          providers: providerDetails,
+        },
+      };
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unknown notification provider error';
+
+      this.logger.warn(
+        'Notification provider readiness check failed',
+        'HealthService',
+        { error: message },
+      );
+
+      return {
+        status: 'down',
+        latencyMs: Date.now() - start,
+        details: {
+          connected: false,
+          error: message,
+        },
+      };
+    }
+  }
+
+  async checkOnchainContract(): Promise<{
+    status: 'up' | 'down';
+    latencyMs: number;
+    adapter: string;
+    metadata?: { version: string; name: string };
+    error?: string;
+  }> {
+    const adapterType =
+      this.configService.get<string>('ONCHAIN_ADAPTER')?.toLowerCase() ||
+      'mock';
+    const result = await this.checkOnchainAdapter();
+    if (result.status === 'up') {
+      return {
+        status: 'up',
+        latencyMs: result.latencyMs,
+        adapter: adapterType,
+        metadata: {
+          name: (result.details?.contractName as string) ?? '',
+          version: (result.details?.contractVersion as string) ?? '',
+        },
+      };
+    }
+    return {
+      status: 'down',
+      latencyMs: result.latencyMs,
+      adapter: adapterType,
+      error: (result.details?.error as string) ?? 'Unknown error',
+    };
   }
 
   /**

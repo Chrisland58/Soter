@@ -48,9 +48,42 @@ jest.mock('../contexts/SaverModeContext', () => ({
   }),
 }));
 
+let mockSyncFrequency = 'normal' as 'aggressive' | 'normal' | 'conservative';
+const mockSetSyncFrequency = jest.fn((freq) => {
+  mockSyncFrequency = freq;
+});
+
+jest.mock('../contexts/SyncDeferralContext', () => ({
+  ...jest.requireActual('../contexts/SyncDeferralContext'),
+  useSyncDeferral: () => ({
+    syncFrequency: mockSyncFrequency,
+    setSyncFrequency: mockSetSyncFrequency,
+    batteryLevel: 1,
+    isCharging: true,
+    isMetered: false,
+    meteredOptIn: false,
+    forceSyncOverride: false,
+    deferralReason: 'none',
+    estimatedUploadSize: 0,
+    setMeteredOptIn: jest.fn(),
+    forceSync: jest.fn(),
+    clearForceSync: jest.fn(),
+    setEstimatedUploadSize: jest.fn(),
+    shouldDeferAction: jest.fn().mockReturnValue({ deferred: false, reason: 'none' }),
+    getDeferralExplanation: jest.fn().mockReturnValue('Sync is active'),
+  }),
+}));
+
 jest.mock('../contexts/CrashReportingContext', () => ({
   useCrashReporting: () => ({
     enabled: true,
+    toggle: jest.fn(),
+  }),
+}));
+
+jest.mock('../contexts/SharedDeviceContext', () => ({
+  useSharedDevice: () => ({
+    enabled: false,
     toggle: jest.fn(),
   }),
 }));
@@ -95,10 +128,34 @@ describe('SettingsScreen', () => {
       isOnCorrectNetwork: false,
       status: 'idle',
     };
+    mockSyncFrequency = 'normal';
+    mockSetSyncFrequency.mockClear();
   });
 
   afterEach(() => {
     jest.restoreAllMocks();
+  });
+
+  it('shows sync frequency controls with options', () => {
+    const { getByText } = render(<SettingsScreen />);
+
+    expect(getByText('Sync Frequency')).toBeTruthy();
+    expect(getByText('Aggressive')).toBeTruthy();
+    expect(getByText('Normal')).toBeTruthy();
+    expect(getByText('Conservative')).toBeTruthy();
+  });
+
+  it('changes sync frequency when frequency chips are pressed', () => {
+    const { getByText } = render(<SettingsScreen />);
+
+    fireEvent.press(getByText('Conservative'));
+    expect(mockSetSyncFrequency).toHaveBeenCalledWith('conservative');
+
+    fireEvent.press(getByText('Aggressive'));
+    expect(mockSetSyncFrequency).toHaveBeenCalledWith('aggressive');
+
+    fireEvent.press(getByText('Normal'));
+    expect(mockSetSyncFrequency).toHaveBeenCalledWith('normal');
   });
 
   it('shows official faucet links on testnet', () => {

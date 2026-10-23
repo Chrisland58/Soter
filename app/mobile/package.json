@@ -10,7 +10,8 @@
     "test": "jest",
     "lint": "expo lint",
     "i18n:check": "node scripts/check-i18n.mjs",
-    "measure:cold-start": "node scripts/measure-cold-start.js"
+    "measure:cold-start": "node scripts/measure-cold-start.js",
+    "e2e:android": "node e2e/run-e2e.js"
   },
   "dependencies": {
     "@babel/runtime": "^7.29.7",
@@ -75,10 +76,12 @@
     ],
     "moduleNameMapper": {
       "^react$": "<rootDir>/node_modules/react",
-      "^react-test-renderer$": "<rootDir>/node_modules/react-test-renderer"
+      "^react-test-renderer$": "<rootDir>/../../node_modules/react-test-renderer",
+      "^expo-modules-core$": "<rootDir>/../../node_modules/expo/node_modules/expo-modules-core",
+      "^expo-modules-core/src/polyfill/dangerous-internal$": "<rootDir>/../../node_modules/expo/node_modules/expo-modules-core/src/polyfill/dangerous-internal.ts"
     },
     "transformIgnorePatterns": [
-      "node_modules/(?!(?:.pnpm/)?((jest-)?react-native|@react-native(?:/.*)?|react-clone-referenced-element|@react-navigation(?:/.*)?|expo(?:nent)?(?:/.*)?|@expo(?:nent)?(?:/.*)?|expo-.*|@expo-google-fonts/.*|react-navigation|@walletconnect(?:/.*)?))"
+      "node_modules/(?!(?:.pnpm/)?((jest-)?react-native|@react-native(?:/.*)?|react-clone-referenced-element|@react-navigation(?:/.*)?|expo(?:nent)?(?:/.*)?|@expo(?:nent)?(?:/.*)?|expo-.*|@expo-google-fonts/.*|react-navigation|@walletconnect(?:/.*)?|@sentry(?:/.*)?))"
     ]
   },
   "private": true

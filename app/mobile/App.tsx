@@ -30,7 +30,10 @@ import {
 } from './src/contexts/CrashReportingContext';
 import { ReleaseNotesModal } from './src/components/ReleaseNotesModal';
 import { ForceUpgradeScreen } from './src/screens/ForceUpgradeScreen';
+import { ForceUpgradeBanner } from './src/components/ForceUpgradeBanner';
+import { NetworkGuardBanner } from './src/components/NetworkGuardBanner';
 import { markColdStartPhase } from './src/startup/coldStartTracker';
+import { SharedDeviceProvider } from './src/contexts/SharedDeviceContext';
 
 // ---------------------------------------------------------------------------
 // Deep-link configuration for React Navigation
@@ -43,11 +46,17 @@ const linking = {
     screens: {
       Home: '',
       AidOverview: 'aid',
+      // EvidenceUpload is declared before AidDetails so the more specific
+      // `aid/:aidId/evidence` path matches first. It is used by the E2E
+      // harness (issue #932) to open evidence capture directly, and by
+      // notification deep links (see DEEP_LINK_SCREEN_MAP).
+      EvidenceUpload: 'aid/:aidId/evidence',
       AidDetails: 'aid/:aidId',
       ClaimReceipt: 'claim/:claimId',
       Settings: 'settings',
       Health: 'health',
       Scanner: 'scanner',
+      SubmissionQueue: 'queue',
     },
   },
 };
@@ -95,25 +104,35 @@ const AppInner = () => {
 
   return (
     <WalletProvider>
-      <BiometricProvider>
-        <SyncDeferralProvider>
-          <SyncProvider>
-            <NavigationContainer
-              linking={linking}
-              theme={navTheme}
-              ref={navigationRef}
-              onReady={() => {
-                markColdStartPhase('navigationReady');
-                setIsNavReady(true);
-              }}
-            >
-              <AppNavigator />
-              <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} />
-            </NavigationContainer>
-            <ReleaseNotesModal />
-          </SyncProvider>
-        </SyncDeferralProvider>
-      </BiometricProvider>
+      <SharedDeviceProvider>
+        <BiometricProvider>
+          <SyncDeferralProvider>
+            <SyncProvider>
+              {/*
+                NetworkGuardBanner and ForceUpgradeBanner sit outside
+                NavigationContainer so they render on every screen — including
+                HomeScreen on cold start — without needing to be wired into each
+                individual screen.
+              */}
+              <NetworkGuardBanner />
+              <ForceUpgradeBanner />
+              <NavigationContainer
+                linking={linking}
+                theme={navTheme}
+                ref={navigationRef}
+                onReady={() => {
+                  markColdStartPhase('navigationReady');
+                  setIsNavReady(true);
+                }}
+              >
+                <AppNavigator />
+                <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} />
+              </NavigationContainer>
+              <ReleaseNotesModal />
+            </SyncProvider>
+          </SyncDeferralProvider>
+        </BiometricProvider>
+      </SharedDeviceProvider>
     </WalletProvider>
   );
 };

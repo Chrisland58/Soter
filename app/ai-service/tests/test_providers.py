@@ -1,8 +1,10 @@
 """Tests for the provider interface (Issue #615)."""
 
+import httpx
 import pytest
 from unittest.mock import MagicMock, patch, PropertyMock
 
+from services import providers as provider_module
 from services.providers import (
     ModelProvider,
     ProviderRegistry,
@@ -14,6 +16,7 @@ from services.providers import (
     FixtureProvider,
     TesseractOCRProvider,
     validate_fallback_order,
+    validate_provider_capability_matrix,
 )
 
 # ---------------------------------------------------------------------------
@@ -243,6 +246,27 @@ class TestProviderRegistry:
             assert "tesseract" in names
             assert "test" not in names
 
+    def test_resolve_filters_providers_by_capability_matrix(self):
+        with patch("services.providers.settings") as mock_settings:
+            mock_settings.provider_capability_matrix = {
+                "openai": [],
+                "groq": ["llm"],
+                "test": ["ocr"],
+                "tesseract": ["ocr"],
+            }
+            mock_settings.test_provider_mode = False
+            mock_settings.openai_api_key = "key"
+            mock_settings.groq_api_key = "key"
+            mock_settings.get_llm_fallback_order.return_value = ["openai", "groq"]
+            mock_settings.get_ocr_fallback_order.return_value = ["test", "tesseract"]
+            registry = ProviderRegistry()
+
+            llm_names = [name for name, _ in registry.resolve_llm()]
+            ocr_names = [name for name, _ in registry.resolve_ocr()]
+
+        assert llm_names == ["groq"]
+        assert ocr_names == ["tesseract"]
+
 
 class TestFallbackOrderValidation:
     def test_valid_order_passes(self):
@@ -261,6 +285,10 @@ class TestFallbackOrderValidation:
     def test_duplicate_provider_rejected(self):
         with pytest.raises(ValueError, match="more than once"):
             validate_fallback_order("LLM_PROVIDER_FALLBACK_ORDER", ["openai", "openai"])
+
+    def test_unknown_capability_rejected(self):
+        with pytest.raises(ValueError, match="unknown capability"):
+            validate_provider_capability_matrix({"openai": ["streaming"]})
 
 
 # ---------------------------------------------------------------------------
@@ -307,20 +335,17 @@ class TestOpenAIProvider:
             mock_settings.ai_deterministic_mode = False
             mock_settings.llm_timeout_seconds = 30
 
-            with patch("httpx.Client") as MockClient:
-                MockClient.return_value.__enter__ = MagicMock(
-                    return_value=mock_client_instance
-                )
-                MockClient.return_value.__exit__ = MagicMock(return_value=False)
-
+            provider_module.close_provider_http_clients()
+            with patch("httpx.Client", return_value=mock_client_instance):
                 resp = OpenAIProvider().llm_chat("sys", "usr", model="gpt-4")
-                assert resp.content == "test content"
-                assert resp.provider == "openai"
-                # No "usage" key in the mocked response: unavailable, not 0
-                # (issue #981).
-                assert resp.prompt_tokens is None
-                assert resp.completion_tokens is None
-                assert resp.total_tokens is None
+            provider_module.close_provider_http_clients()
+            assert resp.content == "test content"
+            assert resp.provider == "openai"
+            # No "usage" key in the mocked response: unavailable, not 0
+            # (issue #981).
+            assert resp.prompt_tokens is None
+            assert resp.completion_tokens is None
+            assert resp.total_tokens is None
 
     def test_llm_chat_success_extracts_usage(self):
         mock_response = MagicMock()
@@ -343,16 +368,42 @@ class TestOpenAIProvider:
             mock_settings.ai_deterministic_mode = False
             mock_settings.llm_timeout_seconds = 30
 
-            with patch("httpx.Client") as MockClient:
-                MockClient.return_value.__enter__ = MagicMock(
-                    return_value=mock_client_instance
-                )
-                MockClient.return_value.__exit__ = MagicMock(return_value=False)
-
+            provider_module.close_provider_http_clients()
+            with patch("httpx.Client", return_value=mock_client_instance):
                 resp = OpenAIProvider().llm_chat("sys", "usr", model="gpt-4")
-                assert resp.prompt_tokens == 42
-                assert resp.completion_tokens == 17
-                assert resp.total_tokens == 59
+            provider_module.close_provider_http_clients()
+            assert resp.prompt_tokens == 42
+            assert resp.completion_tokens == 17
+            assert resp.total_tokens == 59
+
+    def test_retries_when_server_closed_idle_connection(self):
+        stale_client = MagicMock()
+        stale_client.post.side_effect = httpx.RemoteProtocolError(
+            "server closed the idle connection"
+        )
+        fresh_response = MagicMock()
+        fresh_response.raise_for_status = MagicMock()
+        fresh_response.json.return_value = {
+            "choices": [{"message": {"content": "recovered"}}]
+        }
+        fresh_client = MagicMock()
+        fresh_client.post.return_value = fresh_response
+
+        with patch("services.providers.settings") as mock_settings:
+            mock_settings.openai_api_key = "test-key"
+            mock_settings.ai_deterministic_mode = False
+            mock_settings.llm_timeout_seconds = 30
+            mock_settings.provider_http_idle_timeout_seconds = 300
+            provider_module.close_provider_http_clients()
+            with patch(
+                "httpx.Client", side_effect=[stale_client, fresh_client]
+            ) as MockClient:
+                response = OpenAIProvider().llm_chat("sys", "usr", model="gpt-4")
+
+            assert response.content == "recovered"
+            assert MockClient.call_count == 2
+            stale_client.close.assert_called_once_with()
+            provider_module.close_provider_http_clients()
 
 
 class TestGroqProvider:

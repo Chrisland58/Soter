@@ -2,12 +2,17 @@
 v1 humanitarian verification endpoint.
 """
 
+import asyncio
 import hashlib
+import json
 import logging
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Header, Request
+from fastapi import APIRouter, HTTPException, Header, Query, Request, Response
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import StreamingResponse
 
 from config import settings
 from schemas.common import ResultEnvelope
@@ -15,6 +20,7 @@ from schemas.humanitarian import (
     HumanitarianVerificationRequest,
 )
 from services.cache import cached_response
+from services.verification_cooldown import verification_cooldown
 from services.artifact_access import ArtifactAccessError
 from services.decision_audit import get_store as get_decision_audit_store
 from services.humanitarian_prompt import HUMANITARIAN_PROMPT_VERSION
@@ -154,9 +160,84 @@ def _write_audit_record(
         logger.error("decision_audit_record_failed: %s", exc)
 
 
+def _build_verification_envelope(
+    http_request: Request,
+    request: HumanitarianVerificationRequest,
+    raw: Dict[str, Any],
+    *,
+    correlation_id: str,
+    org_id: str,
+    user_id: str,
+    user_role: str,
+    model_version: str,
+    artifact_tag: str,
+    prompt_version: str,
+) -> ResultEnvelope[Dict[str, Any]]:
+    verification = raw.get("verification") if isinstance(raw, dict) else {}
+    if not isinstance(verification, dict):
+        verification = {}
+
+    raw_conf = verification.get("confidence")
+    confidence: Optional[float] = None
+    if isinstance(raw_conf, (int, float)):
+        confidence = round(float(max(0.0, min(1.0, raw_conf))), 4)
+
+    reasons: Optional[List[str]] = None
+    for key in ("reasoning", "reason", "summary", "explanation"):
+        raw_reason = verification.get(key)
+        if isinstance(raw_reason, str) and raw_reason:
+            reasons = [raw_reason]
+            break
+        if isinstance(raw_reason, list) and raw_reason:
+            reasons = [str(reason) for reason in raw_reason]
+            break
+
+    eligible = verification.get("eligible")
+    if isinstance(raw, dict) and raw.get("manual_review") is True:
+        outcome = "manual_review"
+    elif isinstance(eligible, bool):
+        outcome = "eligible" if eligible else "ineligible"
+    else:
+        outcome = "completed"
+    _write_audit_record(
+        http_request,
+        request,
+        outcome=outcome,
+        correlation_id=correlation_id,
+        org_id=org_id,
+        provider=raw.get("provider"),
+        model=raw.get("model"),
+        prompt_variant=raw.get("prompt_variant"),
+        confidence=confidence,
+        reasons=reasons,
+        metadata={
+            "verification": verification,
+            "model_version": model_version,
+            "artifact_tag": artifact_tag,
+            "user_id": user_id,
+            "user_role": user_role,
+        },
+    )
+
+    raw_prompt_version = raw.get("prompt_version")
+    envelope_prompt_version = (
+        raw_prompt_version if isinstance(raw_prompt_version, str) else prompt_version
+    )
+    return ResultEnvelope[Dict[str, Any]](
+        result=raw,
+        confidence=confidence,
+        reasons=reasons,
+        anchor_metadata=request.anchor_metadata,
+        trace_id=correlation_id or None,
+        prompt_version=envelope_prompt_version,
+    )
+
+
 @cached_response(
     prefix="humanitarian_verification",
-    ttl_seconds=settings.cache_ttl_verification,
+    ttl_seconds=min(
+        settings.cache_ttl_verification, settings.verification_cooldown_seconds
+    ),
     key_tags=["model_version", "artifact_tag", "org_id", "prompt_version"],
     content_hash_arg="content_hash",
 )
@@ -172,6 +253,7 @@ async def _verify_claim_cached(
     org_id: str,
     prompt_version: str = "",
     content_hash: str = "",
+    language: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Cacheable wrapper around HumanitarianVerificationService.verify_claim.
@@ -206,9 +288,14 @@ async def _verify_claim_cached(
             provider_preference=provider_preference,
             timeout=timeout,
             prompt_version=prompt_version or None,
+            language=language,
         )
     except TypeError as exc:
-        if "prompt_version" in str(exc) or "timeout" in str(exc):
+        if (
+            "language" in str(exc)
+            or "prompt_version" in str(exc)
+            or "timeout" in str(exc)
+        ):
             try:
                 return humanitarian_verification_service.verify_claim(
                     aid_claim=aid_claim,
@@ -230,15 +317,20 @@ async def _verify_claim_cached(
 @router.post("/ai/humanitarian/verify", response_model=ResultEnvelope[Dict[str, Any]])
 async def verify_humanitarian_claim(
     http_request: Request,
+    response: Response,
     request: HumanitarianVerificationRequest,
     x_org_id: str = Header(default="", alias="X-Org-Id"),
     x_user_id: str = Header(default="", alias="X-User-Id"),
     x_user_role: str = Header(default="", alias="X-User-Role"),
-) -> ResultEnvelope[Dict[str, Any]]:
+    stream: bool = Query(default=False),
+) -> Any:
     """Verify an aid claim against standardised humanitarian criteria.
 
     Validates that all referenced evidence artifacts belong to the requesting
     organization before processing.  Maintains audit logs for access attempts.
+    Set ``stream=true`` to receive provider token events followed by the usual
+    result envelope; streaming bypasses the response cache but still observes
+    the claim cooldown. A cooldown replay emits only the previous result event.
 
     ``artifact_access_control`` and ``humanitarian_verification_service`` are
     resolved from ``request.app.state``.  Production wires them up in the
@@ -398,89 +490,188 @@ async def verify_humanitarian_claim(
         artifact_tag = (
             ",".join(sorted(request.artifact_ids)) if request.artifact_ids else ""
         )
-        content_hash = _compute_evidence_content_hash(
+        evidence_content_hash = _compute_evidence_content_hash(
             request.artifact_ids, artifact_access_control
         )
-
-        raw = await _verify_claim_cached(
-            humanitarian_verification_service,
-            aid_claim=request.aid_claim,
-            supporting_evidence=request.supporting_evidence,
-            context_factors=request.context_factors,
-            provider_preference=request.provider_preference,
-            timeout=timeout,
-            model_version=model_version,
-            artifact_tag=artifact_tag,
-            org_id=x_org_id,
-            prompt_version=prompt_version,
-            content_hash=content_hash,
+        anchor = request.anchor_metadata
+        claim_id = getattr(anchor, "claim_id", None)
+        identity = (
+            f"claim:{claim_id}:content:{evidence_content_hash}"
+            if claim_id
+            else (
+                f"artifacts:{artifact_tag}:content:{evidence_content_hash}"
+                if artifact_tag
+                else None
+            )
         )
-
-        verification: Dict[str, Any] = (
-            raw.get("verification") if isinstance(raw, dict) else {}
+        org_scope = (
+            x_org_id.strip()
+            or x_user_id.strip()
+            or http_request.headers.get("x-api-key", "").strip()
+            or (http_request.client.host if http_request.client else "anonymous")
         )
-        if not isinstance(verification, dict):
-            verification = {}
+        cooldown_key = (
+            verification_cooldown.make_key(org_scope, identity)
+            if identity is not None
+            else None
+        )
+        cache = getattr(state, "cache", None)
+        cooldown_result = (
+            verification_cooldown.get(
+                cache, cooldown_key, settings.verification_cooldown_seconds
+            )
+            if cooldown_key is not None
+            else None
+        )
+        if cooldown_result is not None:
+            response.headers["X-Verification-Cooldown"] = "true"
 
-        # Extract confidence and reasons from the LLM-produced verification dict.
-        confidence: Optional[float] = None
-        raw_conf = verification.get("confidence")
-        if isinstance(raw_conf, (int, float)):
-            confidence = round(float(max(0.0, min(1.0, raw_conf))), 4)
+        content_hash = "" if stream else evidence_content_hash
 
-        reasons: Optional[List[str]] = None
-        for key in ("reasoning", "reason", "summary", "explanation"):
-            raw_reason = verification.get(key)
-            if isinstance(raw_reason, str) and raw_reason:
-                reasons = [raw_reason]
-                break
-            if isinstance(raw_reason, list) and raw_reason:
-                reasons = [str(r) for r in raw_reason]
-                break
+        if stream:
+            if cooldown_result is not None:
 
-        # Issue #990: durably record the decision *before* it is returned,
-        # capturing the inputs, provider, model, prompt version, and outcome
-        # that produced it. ``eligible`` is the disbursement-relevant outcome
-        # when the model supplied it; otherwise the record still proves a
-        # completed decision.
-        eligible = verification.get("eligible")
-        if isinstance(eligible, bool):
-            outcome = "eligible" if eligible else "ineligible"
+                async def cached_stream_events():
+                    envelope = _build_verification_envelope(
+                        http_request,
+                        request,
+                        cooldown_result,
+                        correlation_id=correlation_id,
+                        org_id=x_org_id,
+                        user_id=x_user_id,
+                        user_role=x_user_role,
+                        model_version=model_version,
+                        artifact_tag=artifact_tag,
+                        prompt_version=prompt_version,
+                    )
+                    data = json.dumps(jsonable_encoder(envelope), separators=(",", ":"))
+                    yield f"event: result\ndata: {data}\n\n"
+
+                return StreamingResponse(
+                    cached_stream_events(),
+                    media_type="text/event-stream",
+                    headers={"X-Verification-Cooldown": "true"},
+                )
+
+            async def stream_events():
+                events: asyncio.Queue = asyncio.Queue()
+                loop = asyncio.get_running_loop()
+
+                def publish(event: str, payload: Any = None) -> None:
+                    loop.call_soon_threadsafe(events.put_nowait, (event, payload))
+
+                def run_verification() -> None:
+                    try:
+                        raw_result = humanitarian_verification_service.verify_claim(
+                            aid_claim=request.aid_claim,
+                            supporting_evidence=request.supporting_evidence,
+                            context_factors=request.context_factors,
+                            provider_preference=request.provider_preference,
+                            timeout=timeout,
+                            prompt_version=prompt_version,
+                            on_token=lambda token: publish("token", token),
+                            language=request.language,
+                        )
+                        if cooldown_key is not None:
+                            verification_cooldown.store(
+                                cache,
+                                cooldown_key,
+                                raw_result,
+                                settings.verification_cooldown_seconds,
+                            )
+                        publish("result", raw_result)
+                    except Exception as exc:
+                        logger.error(
+                            "Humanitarian verification failed: %s",
+                            str(exc),
+                            exc_info=True,
+                        )
+                        _write_audit_record(
+                            http_request,
+                            request,
+                            outcome="error",
+                            correlation_id=correlation_id,
+                            org_id=x_org_id,
+                            reasons=[str(exc)],
+                            metadata={
+                                "error_type": type(exc).__name__,
+                                "user_id": x_user_id,
+                                "user_role": x_user_role,
+                            },
+                        )
+                        publish("error")
+                    finally:
+                        publish("done")
+
+                worker = threading.Thread(target=run_verification, daemon=True)
+                worker.start()
+                while True:
+                    event, payload = await events.get()
+                    if event == "token":
+                        data = json.dumps({"token": payload}, ensure_ascii=False)
+                        yield f"event: token\ndata: {data}\n\n"
+                    elif event == "result":
+                        envelope = _build_verification_envelope(
+                            http_request,
+                            request,
+                            payload,
+                            correlation_id=correlation_id,
+                            org_id=x_org_id,
+                            user_id=x_user_id,
+                            user_role=x_user_role,
+                            model_version=model_version,
+                            artifact_tag=artifact_tag,
+                            prompt_version=prompt_version,
+                        )
+                        data = json.dumps(
+                            jsonable_encoder(envelope), separators=(",", ":")
+                        )
+                        yield f"event: result\ndata: {data}\n\n"
+                    elif event == "error":
+                        data = json.dumps(
+                            {"detail": "Humanitarian verification failed"}
+                        )
+                        yield f"event: error\ndata: {data}\n\n"
+                    elif event == "done":
+                        break
+
+            return StreamingResponse(stream_events(), media_type="text/event-stream")
+
+        if cooldown_result is not None:
+            raw = cooldown_result
         else:
-            outcome = "completed"
-        _write_audit_record(
+            raw = await _verify_claim_cached(
+                humanitarian_verification_service,
+                aid_claim=request.aid_claim,
+                supporting_evidence=request.supporting_evidence,
+                context_factors=request.context_factors,
+                provider_preference=request.provider_preference,
+                timeout=timeout,
+                model_version=model_version,
+                artifact_tag=artifact_tag,
+                org_id=x_org_id,
+                prompt_version=prompt_version,
+                content_hash=content_hash,
+                language=request.language,
+            )
+            if cooldown_key is not None:
+                verification_cooldown.store(
+                    cache,
+                    cooldown_key,
+                    raw,
+                    settings.verification_cooldown_seconds,
+                )
+        return _build_verification_envelope(
             http_request,
             request,
-            outcome=outcome,
+            raw,
             correlation_id=correlation_id,
             org_id=x_org_id,
-            provider=raw.get("provider"),
-            model=raw.get("model"),
-            prompt_variant=raw.get("prompt_variant"),
-            confidence=confidence,
-            reasons=reasons,
-            metadata={
-                "verification": verification,
-                "model_version": model_version,
-                "artifact_tag": artifact_tag,
-                "user_id": x_user_id,
-                "user_role": x_user_role,
-            },
-        )
-
-        envelope_prompt_version: Optional[str] = None
-        if isinstance(raw, dict) and isinstance(raw.get("prompt_version"), str):
-            envelope_prompt_version = raw["prompt_version"]
-        elif isinstance(prompt_version, str):
-            envelope_prompt_version = prompt_version
-
-        return ResultEnvelope[Dict[str, Any]](
-            result=raw,
-            confidence=confidence,
-            reasons=reasons,
-            anchor_metadata=request.anchor_metadata,
-            trace_id=correlation_id or None,
-            prompt_version=envelope_prompt_version,
+            user_id=x_user_id,
+            user_role=x_user_role,
+            model_version=model_version,
+            artifact_tag=artifact_tag,
+            prompt_version=prompt_version,
         )
     except HTTPException as http_exc:
         # Access-control denials and misconfiguration are decisions too: they
